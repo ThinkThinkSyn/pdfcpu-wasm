@@ -1,0 +1,173 @@
+# =============================================================================
+# WASM Release Watch
+#
+# Polls the upstream pdfcpu repo for new stable releases, then builds and
+# publishes the WASM bundle to npm automatically.
+#
+# Triggers:
+#   - Scheduled: daily at 00:00 UTC
+#   - Manual: workflow_dispatch with optional version override and dry-run
+#
+# Requires the repository secret NPM_TOKEN to publish to the npm scope.
+# =============================================================================
+
+name: WASM Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      pdfcpu_version:
+        description: "Override pdfcpu version to build (e.g. v0.14.0)"
+        required: false
+        default: ''
+      dry-run:
+        description: "Skip npm publish and git push"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pdfcpu-wasm-update
+  cancel-in-progress: true
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------
+      # 2. Determine the target pdfcpu version
+      # ------------------------------------------------------------------
+      - name: Get version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ github.event.inputs.pdfcpu_version }}" ]; then
+            VER="${{ github.event.inputs.pdfcpu_version }}"
+            echo "Using manually specified version: $VER"
+          else
+            LATEST=$(gh release view --repo pdfcpu/pdfcpu \
+              --json tagName,prerelease \
+              --jq 'select(.prerelease==false) | .tagName')
+            if [ -z "$LATEST" ]; then
+              echo "::error::Could not determine latest stable pdfcpu release"
+              exit 1
+            fi
+            VER="$LATEST"
+            echo "Latest upstream release: $VER"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 3. Compare with currently packaged version
+      # ------------------------------------------------------------------
+      - name: Check if update is needed
+        id: check
+        run: |
+          target="${{ steps.version.outputs.version }}"
+          target="${target#v}"
+
+          current=""
+          if [ -f version.json ]; then
+            current=$(jq -r '.pdfcpu // empty' version.json)
+          fi
+          if [ -z "$current" ] && [ -f go.mod ]; then
+            current=$(grep '^require github.com/pdfcpu/pdfcpu ' go.mod | awk '{print $3}')
+          fi
+
+          echo "current=$current"
+          echo "target=v$target"
+
+          if [ "$current" = "v$target" ]; then
+            echo "Already at upstream version v$target. Nothing to do."
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Update needed: $current → v$target"
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ------------------------------------------------------------------
+      # 4. Setup build tools
+      # ------------------------------------------------------------------
+      - name: Setup Go
+        if: steps.check.outputs.needs_update == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '~1.25'
+          cache: true
+
+      - name: Setup Node.js
+        if: steps.check.outputs.needs_update == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # ------------------------------------------------------------------
+      # 5. Update pdfcpu dependency
+      # ------------------------------------------------------------------
+      - name: Bump pdfcpu dependency
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          go get "github.com/pdfcpu/pdfcpu@${version}"
+          go mod tidy
+
+      # ------------------------------------------------------------------
+      # 6. Build the WASM binary
+      # ------------------------------------------------------------------
+      - name: Build WASM
+        if: steps.check.outputs.needs_update == 'true'
+        run: bash build.sh
+
+      # ------------------------------------------------------------------
+      # 7. Bump npm package version
+      # ------------------------------------------------------------------
+      - name: Bump npm version
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          npm_version="${version#v}"
+          jq --arg v "$npm_version" '.version = $v' package.json > tmp.json
+          mv tmp.json package.json
+          echo "npm version set to $npm_version"
+
+      # ------------------------------------------------------------------
+      # 8. Publish to npm
+      # ------------------------------------------------------------------
+      - name: Publish to npm
+        if: >
+          steps.check.outputs.needs_update == 'true'
+          && github.event.inputs.dry-run != 'true'
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning title=No NPM_TOKEN::NPM_TOKEN secret not set — skipping publish."
+            exit 0
+          fi
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # ------------------------------------------------------------------
+      # 9. Commit updates back to repo
+      # ------------------------------------------------------------------
+      - name: Commit and push
+        if: >
+          steps.check.outputs.needs_update == 'true'
+          && github.event.inputs.dry-run != 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: bump pdfcpu to ${{ steps.version.outputs.version }}"
+          file_pattern: 'go.mod go.sum package.json version.json'
