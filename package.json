@@ -1,6 +1,6 @@
 {
   "name": "@thinkthinksyn/pdfcpu-wasm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "pdfcpu WebAssembly module — edit PDFs from the browser or Node.js",
   "keywords": [
     "pdf",
@@ -8,21 +8,26 @@
     "wasm",
     "webassembly",
     "pdf-editor",
-    "pdf-processing"
+    "pdf-processing",
+    "typescript",
+    "pdf-merge",
+    "pdf-optimize",
+    "pdf-nup",
+    "client-side",
+    "pdf-tools"
   ],
   "license": "Apache-2.0",
-  "author": "pdfcpu Authors",
+  "author": "Harry@ThinkThinkSyn",
   "repository": {
     "type": "git",
-    "url": "https://github.com/thinkthinksyn/pdfcpu-wasm.git"
+    "url": "git+https://github.com/thinkthinksyn/pdfcpu-wasm.git"
   },
   "type": "module",
   "main": "./pdfcpu.ts",
   "types": "./pdfcpu.ts",
   "files": [
-    "main.go",
     "pdfcpu.ts",
-    "build.sh",
+    "version.json",
     "dist/pdfcpu.wasm",
     "dist/wasm_exec.js",
     "README.md"
